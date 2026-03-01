@@ -3,11 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ピクセルシューター by Grok</title>
+    <title>ピクセルシューター by Grok - 武器システム追加版</title>
     <style>
         body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: linear-gradient(180deg, #0f0f23 0%, #1a1a3e 50%, #000 100%); font-family: 'Courier New', monospace; color: #fff; overflow: hidden; }
         canvas { border: 4px solid #fff; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); background: #000; image-rendering: pixelated; }
         #ui { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); text-align: center; font-size: 24px; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); z-index: 10; }
+        #weapon { font-size: 18px; margin-top: 5px; }
         #restart { position: absolute; bottom: 50px; left: 50%; transform: translateX(-50%); padding: 15px 30px; font-size: 20px; background: #ff6b6b; border: none; border-radius: 50px; color: white; cursor: pointer; font-family: inherit; box-shadow: 0 5px 15px rgba(255,107,107,0.4); transition: all 0.3s; display: none; }
         #restart:hover { background: #ff5252; transform: translateX(-50%) translateY(-2px); box-shadow: 0 7px 20px rgba(255,107,107,0.6); }
         #instructions { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); text-align: center; font-size: 14px; opacity: 0.8; }
@@ -17,52 +18,64 @@
 <body>
     <div id="ui">
         <div>スコア: <span id="score">0</span></div>
+        <div id="weapon">武器: ビーム弾</div>
         <div>ハイスコア: <span id="highScore">0</span></div>
     </div>
     <canvas id="gameCanvas" width="400" height="600"></canvas>
     <button id="restart">リスタート</button>
-    <div id="instructions">←→で移動 | タップ/スペースで射撃</div>
+    <div id="instructions">←→で移動 | タップ/スペースで射撃 | 特殊敵(紫)を倒してアイテムGET！</div>
 
     <script>
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
         const scoreEl = document.getElementById('score');
         const highScoreEl = document.getElementById('highScore');
+        const weaponEl = document.getElementById('weapon');
         const restartBtn = document.getElementById('restart');
 
         // ゲーム設定
-        const TILE_SIZE = 20;
         const PLAYER_SIZE = 20;
-        const BULLET_SIZE = 6;
         const ENEMY_SIZE = 24;
         let score = 0;
         let highScore = localStorage.getItem('shooterHighScore') || 0;
         highScoreEl.textContent = highScore;
         let gameRunning = true;
+        let currentWeapon = 'beam'; // 'beam', 'drill', 'sword', 'machinegun', 'launcher'
 
         // プレイヤー
         let player = { x: canvas.width / 2 - PLAYER_SIZE / 2, y: canvas.height - 80, speed: 5 };
 
-        // 弾配列
+        // 配列
         let bullets = [];
         let enemies = [];
+        let items = []; // 新規: アイテム
+        let particles = []; // 爆発エフェクト用
 
         // キー状態
         let keys = {};
+        let shootPressed = false; // ドリル用ホールド検知
 
-        // ピクセル風描画ヘルパー
+        // ピクセル風描画
         function drawPixel(x, y, w, h, color) {
             ctx.fillStyle = color;
             ctx.fillRect(x, y, w, h);
         }
 
-        // プレイヤー描画（三角形自機）
+        // プレイヤー描画
         function drawPlayer() {
             ctx.save();
             ctx.translate(player.x + PLAYER_SIZE / 2, player.y + PLAYER_SIZE / 2);
+            let color1, color2;
+            switch(currentWeapon) {
+                case 'beam': color1 = '#00ff88'; color2 = '#008844'; break;
+                case 'drill': color1 = '#ffaa00'; color2 = '#aa6600'; break;
+                case 'sword': color1 = '#00aaff'; color2 = '#006688'; break;
+                case 'machinegun': color1 = '#ff4488'; color2 = '#aa2255'; break;
+                case 'launcher': color1 = '#ff4444'; color2 = '#aa0000'; break;
+            }
             const grad = ctx.createLinearGradient(0, -PLAYER_SIZE/2, 0, PLAYER_SIZE/2);
-            grad.addColorStop(0, '#00ff88');
-            grad.addColorStop(1, '#008844');
+            grad.addColorStop(0, color1);
+            grad.addColorStop(1, color2);
             ctx.fillStyle = grad;
             ctx.beginPath();
             ctx.moveTo(0, -PLAYER_SIZE/2);
@@ -73,23 +86,72 @@
             ctx.restore();
         }
 
-        // 弾描画
+        // 弾描画（type別）
         function drawBullet(b) {
-            const grad = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, BULLET_SIZE/2);
-            grad.addColorStop(0, '#ffff00');
-            grad.addColorStop(1, '#ffaa00');
-            drawPixel(b.x - BULLET_SIZE/2, b.y - BULLET_SIZE/2, BULLET_SIZE, BULLET_SIZE, grad);
+            let color;
+            switch(b.type) {
+                case 'beam': color = '#ffff00'; break;
+                case 'drill': color = '#ffaa00'; break;
+                case 'machinegun': color = '#ff4488'; break;
+                case 'launcher': color = '#ff6666'; break;
+            }
+            const size = b.type === 'machinegun' ? 4 : 6;
+            const grad = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, size/2);
+            grad.addColorStop(0, color);
+            grad.addColorStop(1, color + '80');
+            drawPixel(b.x - size/2, b.y - size/2, size, size, grad);
         }
 
-        // 敵描画（エイリアン風）
+        // 敵描画（特殊敵は紫）
         function drawEnemy(e) {
+            let color1 = e.special ? '#aa44ff' : '#ff4444';
+            let color2 = e.special ? '#6600aa' : '#aa0000';
             const grad = ctx.createLinearGradient(e.x, e.y, e.x + ENEMY_SIZE, e.y + ENEMY_SIZE);
-            grad.addColorStop(0, '#ff4444');
-            grad.addColorStop(1, '#aa0000');
+            grad.addColorStop(0, color1);
+            grad.addColorStop(1, color2);
             drawPixel(e.x, e.y, ENEMY_SIZE, ENEMY_SIZE, grad);
             // 目
             drawPixel(e.x + 4, e.y + 4, 4, 4, '#fff');
             drawPixel(e.x + 12, e.y + 4, 4, 4, '#fff');
+            if (e.special) {
+                drawPixel(e.x + 8, e.y + 12, 8, 4, '#ffff00'); // 特殊マーク
+            }
+        }
+
+        // アイテム描画
+        function drawItem(i) {
+            let color;
+            switch(i.type) {
+                case 'drill': color = '#ffaa00'; break;
+                case 'sword': color = '#00aaff'; break;
+                case 'machinegun': color = '#ff4488'; break;
+                case 'launcher': color = '#ff4444'; break;
+            }
+            ctx.save();
+            ctx.translate(i.x, i.y);
+            ctx.rotate(Date.now() * 0.01); // 回転
+            const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, 12);
+            grad.addColorStop(0, color);
+            grad.addColorStop(1, color + '80');
+            ctx.fillStyle = grad;
+            ctx.fillRect(-12, -12, 24, 24);
+            ctx.restore();
+            // 文字
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText(i.type.slice(0,3).toUpperCase(), i.x, i.y + 4);
+        }
+
+        // パーティクル描画（爆発）
+        function drawParticles() {
+            particles.forEach(p => {
+                ctx.save();
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x, p.y, 4, 4);
+                ctx.restore();
+            });
         }
 
         // 衝突検知
@@ -115,6 +177,19 @@
             } catch(e) {}
         }
 
+        // パーティクル生成
+        function createParticles(x, y, count = 10, color = '#ffff88') {
+            for (let i = 0; i < count; i++) {
+                particles.push({
+                    x, y,
+                    vx: (Math.random() - 0.5) * 10,
+                    vy: (Math.random() - 0.5) * 10,
+                    life: 1,
+                    color
+                });
+            }
+        }
+
         // 更新
         function update() {
             if (!gameRunning) return;
@@ -123,51 +198,119 @@
             if (keys['ArrowLeft'] || keys['a']) player.x = Math.max(0, player.x - player.speed);
             if (keys['ArrowRight'] || keys['d']) player.x = Math.min(canvas.width - PLAYER_SIZE, player.x + player.speed);
 
+            // 武器表示更新
+            const weaponNames = {beam: 'ビーム弾', drill: 'ドリル', sword: 'ビームソード', machinegun: 'マシンガン', launcher: 'ランチャー'};
+            weaponEl.textContent = `武器: ${weaponNames[currentWeapon]}`;
+
             // 弾更新
             bullets = bullets.filter(b => {
-                b.y -= 8;
-                return b.y > -10;
+                switch(b.type) {
+                    case 'drill':
+                        b.y -= 4; // 短射程
+                        b.life--;
+                        return b.y > -20 && b.life > 0;
+                    case 'launcher':
+                        b.y += 3; // 下向き遅い
+                        return b.y < canvas.height + 20;
+                    default:
+                        b.y -= b.speed || 8;
+                        return b.y > -10;
+                }
             });
 
-            // 敵生成（徐々に増える）
+            // ランチャー爆発処理
+            bullets.forEach((b, bi) => {
+                if (b.type === 'launcher' && b.exploded) {
+                    // 爆発範囲で敵ダメージ
+                    enemies.forEach((e, ei) => {
+                        if (Math.hypot(b.x - e.x - ENEMY_SIZE/2, b.y - e.y - ENEMY_SIZE/2) < 40) {
+                            createParticles(e.x + ENEMY_SIZE/2, e.y + ENEMY_SIZE/2, 15, '#ff4444');
+                            enemies.splice(ei, 1);
+                            score += 20;
+                            scoreEl.textContent = score;
+                        }
+                    });
+                    bullets.splice(bi, 1);
+                }
+            });
+
+            // 敵生成
             if (Math.random() < 0.02 + score * 0.0001) {
-                enemies.push({ x: Math.random() * (canvas.width - ENEMY_SIZE), y: -ENEMY_SIZE, speed: 2 + score * 0.01 });
+                const special = Math.random() < 0.1 || score % 500 < 50; // 特殊敵確率アップ
+                enemies.push({
+                    x: Math.random() * (canvas.width - ENEMY_SIZE),
+                    y: -ENEMY_SIZE,
+                    speed: 2 + score * 0.01,
+                    special
+                });
             }
 
             // 敵更新
-            enemies.forEach(e => {
-                e.y += e.speed;
-                e.speed += 0.001; // 加速
-            });
+            enemies.forEach(e => e.y += e.speed);
             enemies = enemies.filter(e => e.y < canvas.height + 50);
+
+            // アイテム更新（落下）
+            items.forEach(i => i.y += 2);
+            items = items.filter(i => i.y < canvas.height);
 
             // 衝突: 弾と敵
             bullets.forEach((b, bi) => {
                 enemies.forEach((e, ei) => {
-                    if (collision({x: b.x, y: b.y}, e, BULLET_SIZE, ENEMY_SIZE)) {
+                    if (collision({x: b.x, y: b.y, size: 12}, e, 12, ENEMY_SIZE)) {
+                        createParticles(e.x + ENEMY_SIZE/2, e.y + ENEMY_SIZE/2);
                         enemies.splice(ei, 1);
                         bullets.splice(bi, 1);
-                        score += 10;
+                        score += e.special ? 50 : 10;
                         scoreEl.textContent = score;
                         playSound(600, 0.1);
+
+                        // 特殊敵撃破でアイテムドロップ！
+                        if (e.special) {
+                            const types = ['drill', 'sword', 'machinegun', 'launcher'];
+                            const randomType = types[Math.floor(Math.random() * types.length)];
+                            items.push({ x: e.x + ENEMY_SIZE/2, y: e.y + ENEMY_SIZE/2, type: randomType });
+                            playSound(800, 0.2, 'sine');
+                        }
                         return;
                     }
                 });
-            });
 
-            // 衝突: プレイヤーと敵
-            enemies.forEach((e, ei) => {
-                if (collision(player, e)) {
-                    gameOver();
+                // ランチャー壁爆発
+                if (b.type === 'launcher' && (b.y >= canvas.height || b.exploded)) {
+                    b.exploded = true;
+                    createParticles(b.x, b.y, 20, '#ffaa00');
                 }
             });
+
+            // 衝突: プレイヤーと敵/アイテム
+            enemies.forEach(e => {
+                if (collision(player, e)) gameOver();
+            });
+            items.forEach((i, ii) => {
+                if (collision(player, {x: i.x - 12, y: i.y - 12}, PLAYER_SIZE, 24)) {
+                    currentWeapon = i.type;
+                    items.splice(ii, 1);
+                    createParticles(i.x, i.y, 10, '#00ff88');
+                    playSound(1200, 0.3, 'sine');
+                }
+            });
+
+            // パーティクル更新
+            particles.forEach(p => {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.05;
+                p.vy += 0.2; // 重力
+            });
+            particles = particles.filter(p => p.life > 0);
         }
 
         // 描画
         function draw() {
-            // 背景（星）
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 星背景
             for (let i = 0; i < 50; i++) {
                 const x = (i * 123) % canvas.width;
                 const y = (i * 456 + Date.now() * 0.1) % canvas.height;
@@ -178,6 +321,8 @@
             drawPlayer();
             bullets.forEach(drawBullet);
             enemies.forEach(drawEnemy);
+            items.forEach(drawItem);
+            drawParticles();
         }
 
         // ゲームオーバー
@@ -199,33 +344,83 @@
             requestAnimationFrame(gameLoop);
         }
 
+        // 射撃（武器別）
+        function shoot() {
+            switch(currentWeapon) {
+                case 'beam':
+                    if (bullets.length < 5) {
+                        bullets.push({ x: player.x + PLAYER_SIZE / 2, y: player.y, type: 'beam', speed: 10 });
+                        playSound(1000, 0.05, 'sine');
+                    }
+                    break;
+                case 'drill':
+                    // 押しっぱなしで複数/強力
+                    if (bullets.filter(b => b.type === 'drill').length < 3) {
+                        bullets.push({ x: player.x + PLAYER_SIZE / 2, y: player.y, type: 'drill', life: 30 + Math.floor(shootPressed * 20) });
+                        playSound(900, 0.08);
+                    }
+                    break;
+                case 'sword':
+                    // 近接スイング（一時エフェクト）
+                    createParticles(player.x + PLAYER_SIZE, player.y + PLAYER_SIZE/2, 20, '#00aaff');
+                    // 範囲敵ダメージ
+                    enemies.forEach((e, ei) => {
+                        if (Math.abs(e.x - (player.x + PLAYER_SIZE)) < 50 && Math.abs(e.y - player.y) < 30) {
+                            createParticles(e.x + ENEMY_SIZE/2, e.y + ENEMY_SIZE/2);
+                            enemies.splice(ei, 1);
+                            score += 30;
+                            scoreEl.textContent = score;
+                        }
+                    });
+                    playSound(700, 0.15);
+                    break;
+                case 'machinegun':
+                    if (bullets.length < 10) { // 高速連射
+                        bullets.push({ x: player.x + PLAYER_SIZE / 2 + (Math.random()-0.5)*10, y: player.y, type: 'machinegun', speed: 12 });
+                        playSound(1200, 0.03, 'sawtooth');
+                    }
+                    break;
+                case 'launcher':
+                    if (bullets.filter(b => b.type === 'launcher').length < 3) {
+                        bullets.push({ x: player.x + PLAYER_SIZE / 2, y: player.y, type: 'launcher', exploded: false });
+                        playSound(400, 0.1);
+                    }
+                    break;
+            }
+        }
+
         // キーイベント
         document.addEventListener('keydown', e => {
             keys[e.key] = true;
-            if (e.key === ' ' || e.key === 'z' || e.key === 'Z') {
+            if ((e.key === ' ' || e.key === 'z' || e.key === 'Z') && gameRunning) {
                 e.preventDefault();
-                if (gameRunning && bullets.length < 5) { // 連射制限
-                    bullets.push({ x: player.x + PLAYER_SIZE / 2, y: player.y });
-                    playSound(1000, 0.05, 'sine');
-                }
+                shootPressed = true;
+                shoot();
             }
         });
-        document.addEventListener('keyup', e => keys[e.key] = false);
+        document.addEventListener('keyup', e => {
+            keys[e.key] = false;
+            if (e.key === ' ' || e.key === 'z' || e.key === 'Z') {
+                shootPressed = false;
+            }
+        });
 
-        // タッチ操作（スマホ）
+        // タッチ操作
         let touchX = 0;
         canvas.addEventListener('touchstart', e => {
             e.preventDefault();
-            touchX = e.touches[0].clientX - canvas.getBoundingClientRect().left;
-            if (gameRunning && bullets.length < 5) {
-                bullets.push({ x: player.x + PLAYER_SIZE / 2, y: player.y });
-                playSound(1000, 0.05, 'sine');
-            }
+            shootPressed = true;
+            shoot();
         });
         canvas.addEventListener('touchmove', e => {
             e.preventDefault();
-            const newX = e.touches[0].clientX - canvas.getBoundingClientRect().left;
+            const rect = canvas.getBoundingClientRect();
+            const newX = e.touches[0].clientX - rect.left;
             player.x = Math.max(0, Math.min(canvas.width - PLAYER_SIZE, newX - PLAYER_SIZE / 2));
+        });
+        canvas.addEventListener('touchend', e => {
+            e.preventDefault();
+            shootPressed = false;
         });
 
         // リスタート
@@ -233,8 +428,11 @@
             player.x = canvas.width / 2 - PLAYER_SIZE / 2;
             bullets = [];
             enemies = [];
+            items = [];
+            particles = [];
             score = 0;
             scoreEl.textContent = 0;
+            currentWeapon = 'beam';
             gameRunning = true;
             restartBtn.style.display = 'none';
         });
