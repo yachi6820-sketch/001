@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ピクセルシューター by Grok - バグ修正版</title>
+    <title>ピクセルシューター by Grok - バグ完全修正版</title>
     <style>
         body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: linear-gradient(180deg, #0f0f23 0%, #1a1a3e 50%, #000 100%); font-family: 'Courier New', monospace; color: #fff; overflow: hidden; }
         canvas { border: 4px solid #fff; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); background: #000; image-rendering: pixelated; }
@@ -33,35 +33,30 @@
         const weaponEl = document.getElementById('weapon');
         const restartBtn = document.getElementById('restart');
 
-        // ゲーム設定
         const PLAYER_SIZE = 20;
         const ENEMY_SIZE = 24;
         let score = 0;
         let highScore = localStorage.getItem('shooterHighScore') || 0;
         highScoreEl.textContent = highScore;
         let gameRunning = true;
-        let currentWeapon = 'beam'; // 'beam', 'drill', 'sword', 'machinegun', 'launcher'
+        let currentWeapon = 'beam';
 
-        // プレイヤー
         let player = { x: canvas.width / 2 - PLAYER_SIZE / 2, y: canvas.height - 80, speed: 5 };
 
-        // 配列
         let bullets = [];
         let enemies = [];
         let items = [];
         let particles = [];
 
-        // キー状態
         let keys = {};
         let shootPressed = false;
+        let shootTimer = 0; // 連射間隔用
 
-        // ピクセル風描画
         function drawPixel(x, y, w, h, color) {
             ctx.fillStyle = color;
             ctx.fillRect(x, y, w, h);
         }
 
-        // プレイヤー描画
         function drawPlayer() {
             ctx.save();
             ctx.translate(player.x + PLAYER_SIZE / 2, player.y + PLAYER_SIZE / 2);
@@ -82,4 +77,305 @@
             ctx.moveTo(0, -PLAYER_SIZE/2);
             ctx.lineTo(-PLAYER_SIZE/2, PLAYER_SIZE/2);
             ctx.lineTo(PLAYER_SIZE/2, PLAYER_SIZE/2);
-            ctx.closePath
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        }
+
+        function drawBullet(b) {
+            let color, size = 6;
+            switch(b.type) {
+                case 'beam': color = '#ffff00'; break;
+                case 'drill': color = '#ffaa00'; size = 8; break;
+                case 'machinegun': color = '#ff4488'; size = 4; break;
+                case 'launcher': color = '#ff6666'; size = 10; break;
+                default: color = '#ffff00';
+            }
+            const grad = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, size/2);
+            grad.addColorStop(0, color);
+            grad.addColorStop(1, color + '80');
+            drawPixel(b.x - size/2, b.y - size/2, size, size, grad);
+        }
+
+        function drawEnemy(e) {
+            let color1 = e.special ? '#aa44ff' : '#ff4444';
+            let color2 = e.special ? '#6600aa' : '#aa0000';
+            const grad = ctx.createLinearGradient(e.x, e.y, e.x + ENEMY_SIZE, e.y + ENEMY_SIZE);
+            grad.addColorStop(0, color1);
+            grad.addColorStop(1, color2);
+            drawPixel(e.x, e.y, ENEMY_SIZE, ENEMY_SIZE, grad);
+            drawPixel(e.x + 4, e.y + 4, 4, 4, '#fff');
+            drawPixel(e.x + 12, e.y + 4, 4, 4, '#fff');
+            if (e.special) drawPixel(e.x + 8, e.y + 12, 8, 4, '#ffff00');
+        }
+
+        function drawItem(i) {
+            let color;
+            switch(i.type) {
+                case 'drill': color = '#ffaa00'; break;
+                case 'sword': color = '#00aaff'; break;
+                case 'machinegun': color = '#ff4488'; break;
+                case 'launcher': color = '#ff4444'; break;
+            }
+            ctx.save();
+            ctx.translate(i.x, i.y);
+            ctx.rotate(Date.now() * 0.01);
+            const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, 12);
+            grad.addColorStop(0, color);
+            grad.addColorStop(1, color + '80');
+            ctx.fillStyle = grad;
+            ctx.fillRect(-12, -12, 24, 24);
+            ctx.restore();
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText(i.type.slice(0,3).toUpperCase(), i.x, i.y + 4);
+        }
+
+        function drawParticles() {
+            particles.forEach(p => {
+                ctx.save();
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x, p.y, 4, 4);
+                ctx.restore();
+            });
+        }
+
+        function collision(a, b, sizeA = PLAYER_SIZE, sizeB = ENEMY_SIZE) {
+            return a.x < b.x + sizeB && a.x + sizeA > b.x &&
+                   a.y < b.y + sizeB && a.y + sizeA > b.y;
+        }
+
+        function playSound(freq, duration, type = 'square') {
+            try {
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                oscillator.frequency.value = freq;
+                oscillator.type = type;
+                gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+                oscillator.start();
+                oscillator.stop(audioCtx.currentTime + duration);
+            } catch(e) {}
+        }
+
+        function createParticles(x, y, count = 10, color = '#ffff88') {
+            for (let i = 0; i < count; i++) {
+                particles.push({
+                    x, y,
+                    vx: (Math.random() - 0.5) * 10,
+                    vy: (Math.random() - 0.5) * 10 - 2,
+                    life: 1,
+                    color
+                });
+            }
+        }
+
+        function update() {
+            if (!gameRunning) return;
+
+            // 移動
+            if (keys['ArrowLeft'] || keys['a']) player.x = Math.max(0, player.x - player.speed);
+            if (keys['ArrowRight'] || keys['d']) player.x = Math.min(canvas.width - PLAYER_SIZE, player.x + player.speed);
+
+            weaponEl.textContent = `武器: ${{beam:'ビーム弾',drill:'ドリル',sword:'ビームソード',machinegun:'マシンガン',launcher:'ランチャー'}[currentWeapon] || 'ビーム弾'}`;
+
+            // 弾更新
+            bullets = bullets.filter(b => {
+                if (b.type === 'launcher') b.y -= 4; // 上に飛ぶ（修正！）
+                else if (b.type === 'drill') b.y -= 3;
+                else b.y -= (b.speed || 8);
+
+                if (b.type === 'drill') b.life--;
+                if (b.type === 'launcher' && b.y < -20) b.exploded = true;
+
+                return b.y > -50 && (b.type !== 'drill' || b.life > 0);
+            });
+
+            // ランチャー爆発
+            bullets.forEach((b, bi) => {
+                if (b.type === 'launcher' && b.exploded) {
+                    createParticles(b.x, b.y, 20, '#ffaa00');
+                    enemies.forEach((e, ei) => {
+                        if (Math.hypot(b.x - (e.x + ENEMY_SIZE/2), b.y - (e.y + ENEMY_SIZE/2)) < 60) {
+                            createParticles(e.x + ENEMY_SIZE/2, e.y + ENEMY_SIZE/2, 15, '#ff4444');
+                            enemies.splice(ei, 1);
+                            score += 30;
+                        }
+                    });
+                    bullets.splice(bi, 1);
+                }
+            });
+
+            // 敵生成
+            if (Math.random() < 0.025 + score * 0.00015) {
+                const special = Math.random() < 0.15 + (score / 2000);
+                enemies.push({x: Math.random() * (canvas.width - ENEMY_SIZE), y: -ENEMY_SIZE, speed: 2 + score * 0.012, special});
+            }
+
+            enemies.forEach(e => e.y += e.speed);
+            enemies = enemies.filter(e => e.y < canvas.height + 50);
+
+            items.forEach(i => i.y += 1.8);
+            items = items.filter(i => i.y < canvas.height);
+
+            // 衝突処理
+            bullets.forEach((b, bi) => {
+                enemies.forEach((e, ei) => {
+                    if (collision({x:b.x-6, y:b.y-6}, {x:e.x, y:e.y}, 12, ENEMY_SIZE)) {
+                        enemies.splice(ei, 1);
+                        bullets.splice(bi, 1);
+                        score += e.special ? 60 : 15;
+                        scoreEl.textContent = score;
+                        playSound(600, 0.1);
+                        createParticles(e.x + ENEMY_SIZE/2, e.y + ENEMY_SIZE/2);
+
+                        if (e.special) {
+                            const types = ['drill','sword','machinegun','launcher'];
+                            items.push({x: e.x + ENEMY_SIZE/2, y: e.y + ENEMY_SIZE/2, type: types[Math.floor(Math.random()*types.length)]});
+                            playSound(900, 0.25, 'sine');
+                        }
+                    }
+                });
+            });
+
+            enemies.forEach(e => {
+                if (collision(player, {x:e.x, y:e.y}, PLAYER_SIZE, ENEMY_SIZE)) gameOver();
+            });
+
+            items.forEach((i, ii) => {
+                if (collision(player, {x:i.x-12, y:i.y-12}, PLAYER_SIZE, 24)) {
+                    currentWeapon = i.type;
+                    items.splice(ii, 1);
+                    playSound(1200, 0.3, 'sine');
+                    createParticles(i.x, i.y, 12, '#88ff88');
+                }
+            });
+
+            particles.forEach(p => {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.04;
+                p.vy += 0.15;
+            });
+            particles = particles.filter(p => p.life > 0);
+
+            // 自動連射（マシンガンなど）
+            if (shootPressed && shootTimer <= 0) {
+                shoot();
+                shootTimer = currentWeapon === 'machinegun' ? 4 : 12;
+            }
+            shootTimer--;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            for (let i = 0; i < 60; i++) {
+                const x = (i * 137 % canvas.width);
+                const y = (i * 289 + Date.now() * 0.08) % canvas.height;
+                ctx.fillStyle = `rgba(255,255,255,${Math.random()*0.5+0.3})`;
+                ctx.fillRect(x, y, 1, 1);
+            }
+
+            drawPlayer();
+            bullets.forEach(drawBullet);
+            enemies.forEach(drawEnemy);
+            items.forEach(drawItem);
+            drawParticles();
+        }
+
+        function gameOver() {
+            gameRunning = false;
+            if (score > highScore) {
+                highScore = score;
+                highScoreEl.textContent = highScore;
+                localStorage.setItem('shooterHighScore', highScore);
+            }
+            restartBtn.style.display = 'block';
+            playSound(180, 0.4);
+        }
+
+        function shoot() {
+            const px = player.x + PLAYER_SIZE / 2;
+            switch(currentWeapon) {
+                case 'beam':
+                    if (bullets.length < 6) bullets.push({x:px, y:player.y, type:'beam'});
+                    playSound(1100, 0.05, 'sine');
+                    break;
+                case 'drill':
+                    bullets.push({x:px, y:player.y, type:'drill', life: 40 + (shootPressed ? 20 : 0)});
+                    playSound(850, 0.12);
+                    break;
+                case 'sword':
+                    createParticles(player.x + PLAYER_SIZE, player.y, 25, '#00ffff');
+                    enemies.forEach((e, ei) => {
+                        if (Math.abs(e.x - player.x) < 80 && Math.abs(e.y - player.y) < 40) {
+                            enemies.splice(ei, 1);
+                            score += 40;
+                            createParticles(e.x + ENEMY_SIZE/2, e.y + ENEMY_SIZE/2);
+                        }
+                    });
+                    playSound(600, 0.18);
+                    break;
+                case 'machinegun':
+                    bullets.push({x:px + (Math.random()-0.5)*12, y:player.y, type:'machinegun', speed:14});
+                    playSound(1300, 0.03, 'sawtooth');
+                    break;
+                case 'launcher':
+                    bullets.push({x:px, y:player.y, type:'launcher', exploded:false});
+                    playSound(350, 0.15);
+                    break;
+            }
+        }
+
+        document.addEventListener('keydown', e => {
+            keys[e.key] = true;
+            if ((e.key === ' ' || e.key === 'z') && gameRunning) {
+                e.preventDefault();
+                shootPressed = true;
+                shoot();
+            }
+        });
+        document.addEventListener('keyup', e => {
+            keys[e.key] = false;
+            if (e.key === ' ' || e.key === 'z') shootPressed = false;
+        });
+
+        canvas.addEventListener('touchstart', e => {
+            e.preventDefault();
+            shootPressed = true;
+            shoot();
+        });
+        canvas.addEventListener('touchmove', e => {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            player.x = Math.max(0, Math.min(canvas.width - PLAYER_SIZE, e.touches[0].clientX - rect.left - PLAYER_SIZE / 2));
+        });
+        canvas.addEventListener('touchend', () => shootPressed = false);
+
+        restartBtn.addEventListener('click', () => {
+            player.x = canvas.width / 2 - PLAYER_SIZE / 2;
+            bullets = enemies = items = particles = [];
+            score = 0;
+            scoreEl.textContent = 0;
+            currentWeapon = 'beam';
+            gameRunning = true;
+            restartBtn.style.display = 'none';
+        });
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        gameLoop();
+    </script>
+</body>
+</html>
